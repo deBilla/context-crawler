@@ -7,6 +7,7 @@ from typing import Any
 from shared.llm_client import LLMClient
 from shared.models import CreditCardDeal
 
+from extractor.normalize import is_placeholder_deal, normalize_deal
 from extractor.prompts import (
     CANONICAL_CATEGORIES,
     EXTRACTION_PROMPT,
@@ -112,6 +113,23 @@ async def extract_deals(
                 for old_key, new_key in aliases.items():
                     if old_key in deal_data and new_key not in deal_data:
                         deal_data[new_key] = deal_data.pop(old_key)
+
+                # Drop "No offers available" notices and bare "View details"
+                # stubs before they reach the database and, from there, the site.
+                if is_placeholder_deal(deal_data):
+                    logger.info(
+                        "Skipping placeholder deal %d from %s: %r",
+                        i,
+                        url,
+                        deal_data.get("promotion_title"),
+                    )
+                    continue
+
+                # Coerce dates and filler strings before validation. Without
+                # this a value like "30th September 2025" fails the `date` type
+                # and the whole deal is discarded, losing the discount, merchant
+                # and terms along with the date.
+                deal_data = normalize_deal(deal_data)
 
                 # Inject source_url — the LLM doesn't know it
                 deal_data["source_url"] = url
