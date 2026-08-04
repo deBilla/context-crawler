@@ -45,9 +45,29 @@ For each deal found, extract the following information:
 - max_discount_lkr: Maximum discount limit in LKR
 - merchant_name: Name of merchant/store if applicable
 - merchant_category: Category of merchant if applicable
-- valid_from: Start date of promotion (ISO format or descriptive)
-- valid_until: End date of promotion (ISO format or descriptive)
+- valid_from: Start date, strictly "YYYY-MM-DD", or null
+- valid_until: End date, strictly "YYYY-MM-DD", or null
 - terms_and_conditions: Terms and conditions text
+
+DATE RULES (important — dates are stored as real dates, not text):
+- Always output dates as "YYYY-MM-DD". Never write descriptive text such as
+  "Not specified", "Ongoing", "Till stocks last" or "30th September" in a date
+  field. If the page does not state a date, output null.
+- Convert what the page does say: "Till 30th September 2025" -> "2025-09-30",
+  "01.09.2025 - 30.09.2025" -> valid_from "2025-09-01", valid_until "2025-09-30".
+- Day-first is the Sri Lankan convention: "05/09/2025" is 5 September 2025.
+- If only a year-less date is given, infer the year from the page context; if
+  that is genuinely ambiguous, output null rather than guessing.
+- A single-day promotion ("valid on 25th September 2025") sets BOTH valid_from
+  and valid_until to that date.
+
+SKIP non-promotions. Do not return a deal for:
+- Notices that there is nothing on offer ("No offers available at the moment",
+  "Watch this space", "Coming soon").
+- Navigation or listing stubs whose only description would be "View offer
+  details", "Click here", "Read more" or similar.
+- Generic card product pages that describe a card rather than a promotion.
+If the page contains no real promotions, return an empty array.
 
 Return a JSON array of deals. Each deal must have bank_name, card_name, card_types,
 promotion_title, description, and category. Other fields can be null if not mentioned.
