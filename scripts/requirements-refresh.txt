@@ -1,0 +1,17 @@
+# Dependencies for scripts/refresh.py — the single-process refresh.
+#
+# Deliberately smaller than the services' own requirements: the driver imports
+# fetcher, html_parser, link_filter, relevance and extract, none of which touch
+# Postgres, MinIO or OpenTelemetry. redis is here only because shared/__init__
+# re-exports RedisQueue at import time; no server is ever contacted.
+#
+#   python3 -m venv .venv && .venv/bin/pip install -r scripts/requirements-refresh.txt
+#
+# Needs Python 3.11+ (shared/ uses match statements).
+
+httpx[http2]>=0.27,<1.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+pydantic>=2.0,<3.0
+pydantic-settings>=2.0,<3.0
+redis>=5.0,<6.0

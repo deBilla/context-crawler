@@ -110,7 +110,41 @@ scripts/seed.py
 | **Prometheus** | 9090 | Metrics storage, scrapes OTel Collector + MinIO |
 | **Grafana** | 3001 | Dashboards (admin/admin) |
 
-## Quick Start
+## Refreshing offerspot (no Docker)
+
+For the recurring job — revisit the bank sites, see what changed, update the
+site — use `scripts/refresh.py` instead of the compose stack. It imports the
+same fetching, relevance and extraction modules the services use, but drives
+them in one process, so there is nothing to boot and nothing to poll for
+completion. Full rationale in the script's docstring.
+
+```bash
+python3 -m venv .venv                                    # needs Python 3.11+
+.venv/bin/pip install -r scripts/requirements-refresh.txt
+
+claude auth                                              # subscription login
+printf 'LLM_PROVIDER=claude_code\nLLM_MODEL=claude-sonnet-5\n' > .env
+
+.venv/bin/python scripts/refresh.py --merge ../offerspot/src/app/api/data.json
+```
+
+That writes straight into offerspot's `data.json`, keeping the IDs of offers
+already published. Review with `git diff` there before committing.
+
+Useful flags — `--banks "People's Bank"` to scope a run, `--max-pages-per-bank`
+to bound it, `--no-cache` to force re-extraction, and `--out` on its own to
+produce an export without touching the site.
+
+Every page's content hash and extracted deals are cached in
+`.refresh-cache.json`, so an unchanged page costs a conditional fetch and no
+LLM call. A first run over a bank is on the order of twenty LLM calls; a repeat
+run with nothing changed is zero. Keep that file between runs — it is what
+makes a subscription-backed nightly refresh practical.
+
+## Quick Start (full pipeline)
+
+Use this for wide exploratory crawls and the dashboard. For a routine data
+refresh, prefer `scripts/refresh.py` above.
 
 ### Prerequisites
 
@@ -177,8 +211,14 @@ docker compose exec redis redis-cli llen queue:extraction
 
 ### 6. Export Deals to offerspot
 
+Export IDs are positional and shift between runs, so never point the site at
+one directly — merge it, which matches on content and preserves the IDs
+already published.
+
 ```bash
 python3 scripts/export_deals_json.py > deals.json
+python3 scripts/merge_into_offerspot.py deals.json \
+    --data ../offerspot/src/app/api/data.json --dry-run
 ```
 
 ## API Endpoints
