@@ -45,3 +45,6 @@ class LLMConfig(BaseSettings):
     llm_api_key: str = ""
     llm_max_retries: int = 2
     llm_timeout: float = 60.0
+    # claude_code provider only: the CLI to shell out to. Override when it is
+    # not on PATH (a Docker service, for instance, has no login of its own).
+    claude_bin: str = "claude"

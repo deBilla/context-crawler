@@ -38,6 +38,7 @@ class LLMProvider(StrEnum):
     OLLAMA = "ollama"
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
+    CLAUDE_CODE = "claude_code"
 
 
 # ---------------------------------------------------------------------------

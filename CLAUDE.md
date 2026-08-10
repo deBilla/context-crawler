@@ -64,11 +64,28 @@ python3 scripts/seed.py --clear
 
 ## LLM Configuration
 
-Default: Ollama (local). Set via env vars:
-- `LLM_PROVIDER`: `ollama` | `openai` | `anthropic`
-- `LLM_MODEL`: model name (e.g., `qwen2.5-coder:14b`)
-- `LLM_BASE_URL`: provider endpoint
-- `LLM_API_KEY`: API key (for OpenAI/Anthropic)
+Set via env vars:
+- `LLM_PROVIDER`: `claude_code` | `ollama` | `openai` | `anthropic`
+- `LLM_MODEL`: model name (e.g. `claude-sonnet-5`, `qwen2.5-coder:14b`)
+- `LLM_BASE_URL`: provider endpoint (ollama/openai only)
+- `LLM_API_KEY`: API key (openai/anthropic only)
+- `CLAUDE_BIN`: path to the `claude` CLI (claude_code only, default `claude`)
+
+`claude_code` runs prompts through the local `claude` CLI, billing against a
+Pro/Max subscription instead of a metered key. Pick a provider by workload:
+
+| Workload | Provider | Why |
+|----------|----------|-----|
+| Nightly incremental refresh | `claude_code` | Tens of changed pages; no API key, no per-token cost |
+| Initial full backfill | `anthropic` | Thousands of pages — subscription rate limits and ~3.5s/call cold start make the CLI the wrong tool |
+| Offline / no credentials | `ollama` | Free, but weak at structured extraction |
+
+Two gotchas if you touch `llm_client.py`:
+- Callers disagree on JSON shape — `relevance.py` wants an object, `extract.py`
+  wants an array. Do not force one via assistant prefill or a `json_object`
+  response format; `complete_json()` tolerates both plus fences and prose.
+- The OpenAI client sends `response_format: {"type": "json_object"}`, which
+  cannot return the array `extract.py` asks for. That path is untested.
 
 ## Testing
 
