@@ -5,8 +5,16 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
 
+# Site chrome that repeats on every page. Dropping it matters more than it
+# looks: both LLM stages read a prefix of this text (relevance the first 2k
+# chars, extraction the first 8k), and a bank's mega-menu can run past 6k on
+# its own — pushing the actual promotions out of the window entirely, so a page
+# full of live offers reads as irrelevant boilerplate.
+BOILERPLATE_TAGS = ["script", "style", "noscript", "nav", "header", "footer", "aside", "form", "svg"]
+
+
 def extract_text(html: bytes) -> str:
-    """Extract visible text from HTML content.
+    """Extract visible text from HTML content, minus repeated site chrome.
 
     Args:
         html: HTML content as bytes.
@@ -16,8 +24,7 @@ def extract_text(html: bytes) -> str:
     """
     soup = BeautifulSoup(html, "lxml")
 
-    # Remove script and style tags
-    for tag in soup(["script", "style"]):
+    for tag in soup(BOILERPLATE_TAGS):
         tag.decompose()
 
     # Get text
