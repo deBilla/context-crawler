@@ -53,7 +53,7 @@
         "https://www.peoplesbank.lk/special-offers/"
       ],
       "url_patterns": [
-        "^https://www\\.peoplesbank\\.lk/special-offers/.*"
+        "^https://www\\.peoplesbank\\.lk/(special-offers|promotion-category)/.*"
       ],
       "needs_puppeteer": false,
       "crawl_strategy": "category_discovery",
