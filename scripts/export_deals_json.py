@@ -1,22 +1,21 @@
 """Export credit card deals from Postgres to offerspot-compatible JSON.
 
-Usage:
-    docker compose exec -T postgres psql -U crawler -d crawler \
-        -c "COPY (SELECT row_to_json(t) FROM (SELECT * FROM credit_card_deals ORDER BY id) t) TO STDOUT" \
-        | python3 scripts/export_deals_json.py > /tmp/deals_export.json
+Reads straight from the Docker Postgres — no arguments, no piping needed:
 
-Or run directly (requires DB access):
-    python3 scripts/export_deals_json.py --db-url postgresql://crawler:crawlerpass@localhost:5432/crawler
+    python3 scripts/export_deals_json.py > /tmp/deals_export.json
+
+The IDs it assigns are positional and therefore unstable between runs. Never
+feed the output to the site directly; pass it through merge_into_offerspot.py,
+which matches on content and keeps the IDs already published.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
-import re
 import subprocess
 import sys
 from collections import Counter
+from pathlib import Path
 
 
 # Normalize messy bank names from LLM extraction to canonical names
@@ -166,7 +165,9 @@ def fetch_deals_via_docker() -> list[dict]:
     result = subprocess.run(
         ["docker", "compose", "exec", "-T", "postgres",
          "psql", "-U", "crawler", "-d", "crawler", "-c", query],
-        capture_output=True, text=True, cwd="/Users/dimuthu/crd-promo-crawler",
+        capture_output=True, text=True,
+        # compose must run from the repo root to find docker-compose.yml.
+        cwd=Path(__file__).resolve().parents[1],
     )
     if result.returncode != 0:
         print(f"Error: {result.stderr}", file=sys.stderr)
