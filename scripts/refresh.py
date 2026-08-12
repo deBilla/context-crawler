@@ -41,7 +41,7 @@ for _pkg in ("shared", "services/crawler", "services/parser", "services/extracto
 
 from crawler.config import CrawlerConfig  # noqa: E402
 from crawler.fetcher import FetchError, PageFetcher, create_http_client  # noqa: E402
-from export_deals_json import BANK_CODES, row_to_offerspot  # noqa: E402
+from export_deals_json import BANK_CODES, normalize_bank, row_to_offerspot  # noqa: E402
 from extractor.extract import extract_deals  # noqa: E402
 from parser.html_parser import extract_links, extract_text, extract_title  # noqa: E402
 from parser.link_filter import filter_urls  # noqa: E402
@@ -254,62 +254,45 @@ def to_offerspot(deals: list[dict]) -> list[dict]:
         title = (deal.get("promotion_title") or "").strip()
         if len(title) < 5:
             continue
-        code = BANK_CODES.get(deal.get("bank_name", ""), "unk")
+        # Look the code up under the canonical name, the same one
+        # row_to_offerspot will store — otherwise a raw "Commercial Bank of
+        # Ceylon PLC" takes the "unk" prefix while its bank field reads
+        # "Commercial Bank", and the two disagree on the same offer.
+        code = BANK_CODES.get(normalize_bank(deal.get("bank_name", "")), "unk")
         counters[code] += 1
         offers.append(row_to_offerspot(deal, f"po-{code}-{counters[code]:04d}"))
     return offers
 
 
-async def run(args: argparse.Namespace) -> int:
-    banks_config = json.loads((ROOT / "config" / "banks.json").read_text(encoding="utf-8"))
-    banks = banks_config["banks"]
-    if args.banks:
-        wanted = {b.strip().lower() for b in args.banks.split(",")}
-        banks = [b for b in banks if b["name"].lower() in wanted]
-        if not banks:
-            logger.error("No banks matched %s", args.banks)
-            return 1
+def deals_from_cache(cache: PageCache) -> list[dict]:
+    """Every deal the cache is holding, without touching the network.
 
-    config = CrawlerConfig()
-    llm_config = LLMConfig()
-    logger.info("LLM provider: %s (%s)", llm_config.llm_provider, llm_config.llm_model)
+    Lets an export be rebuilt after a normalisation or mapping change without
+    re-crawling and re-paying for extraction.
+    """
+    return [deal for entry in cache.entries.values() for deal in entry.get("deals", [])]
 
-    cache = PageCache(Path(args.cache), enabled=not args.no_cache)
-    throttle = DomainThrottle(config.request_delay)
-    stats: Counter = Counter()
 
-    client = create_http_client(config)
-    fetcher = PageFetcher(client, config)
-    llm = create_llm_client(llm_config)
-
-    all_deals: list[dict] = []
-    try:
-        for bank in banks:
-            all_deals.extend(await crawl_bank(
-                bank,
-                fetcher=fetcher, llm=llm, cache=cache, throttle=throttle,
-                config=config, max_depth=args.max_depth,
-                max_pages=args.max_pages_per_bank, stats=stats,
-            ))
-    finally:
-        await client.aclose()
-        await llm.close()
-        cache.save()
-
+def finish(
+    args: argparse.Namespace, all_deals: list[dict], stats: Counter, *, offline: bool = False
+) -> int:
+    """Convert, write, report and optionally merge. Shared by both paths."""
     offers = to_offerspot(all_deals)
     Path(args.out).write_text(
         json.dumps(offers, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
-    logger.info("--- run summary ---")
-    for label in (
-        "pages", "unchanged", "changed", "fetch_failed", "parse_failed",
-        "prefilter_likely", "prefilter_unlikely", "prefilter_uncertain",
-        "llm_relevance", "llm_extract", "irrelevant", "deals_found",
-        "puppeteer_unavailable",
-    ):
-        logger.info("  %-22s %d", label, stats[label])
-    logger.info("  %-22s %d", "llm calls total", stats["llm_relevance"] + stats["llm_extract"])
+    if not offline:
+        logger.info("--- run summary ---")
+        for label in (
+            "pages", "unchanged", "changed", "fetch_failed", "parse_failed",
+            "prefilter_likely", "prefilter_unlikely", "prefilter_uncertain",
+            "llm_relevance", "llm_extract", "irrelevant", "deals_found",
+            "puppeteer_unavailable",
+        ):
+            logger.info("  %-22s %d", label, stats[label])
+        logger.info("  %-22s %d", "llm calls total",
+                    stats["llm_relevance"] + stats["llm_extract"])
     logger.info("wrote %d offers to %s", len(offers), args.out)
 
     if args.merge:
@@ -333,6 +316,55 @@ async def run(args: argparse.Namespace) -> int:
     return 0
 
 
+async def run(args: argparse.Namespace) -> int:
+    banks_config = json.loads((ROOT / "config" / "banks.json").read_text(encoding="utf-8"))
+    banks = banks_config["banks"]
+    if args.banks:
+        wanted = {b.strip().lower() for b in args.banks.split(",")}
+        banks = [b for b in banks if b["name"].lower() in wanted]
+        if not banks:
+            logger.error("No banks matched %s", args.banks)
+            return 1
+
+    config = CrawlerConfig()
+    stats: Counter = Counter()
+    cache = PageCache(Path(args.cache), enabled=not args.no_cache)
+
+    if args.offline:
+        if not cache.entries:
+            logger.error("--offline needs a populated cache; %s is empty or missing", args.cache)
+            return 1
+        all_deals = deals_from_cache(cache)
+        logger.info("offline rebuild: %d pages, %d deals from cache",
+                    len(cache.entries), len(all_deals))
+        return finish(args, all_deals, stats, offline=True)
+
+    llm_config = LLMConfig()
+    logger.info("LLM provider: %s (%s)", llm_config.llm_provider, llm_config.llm_model)
+
+    throttle = DomainThrottle(config.request_delay)
+
+    client = create_http_client(config)
+    fetcher = PageFetcher(client, config)
+    llm = create_llm_client(llm_config)
+
+    all_deals: list[dict] = []
+    try:
+        for bank in banks:
+            all_deals.extend(await crawl_bank(
+                bank,
+                fetcher=fetcher, llm=llm, cache=cache, throttle=throttle,
+                config=config, max_depth=args.max_depth,
+                max_pages=args.max_pages_per_bank, stats=stats,
+            ))
+    finally:
+        await client.aclose()
+        await llm.close()
+        cache.save()
+
+    return finish(args, all_deals, stats)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--banks", help="comma-separated bank names (default: all)")
@@ -346,6 +378,9 @@ def main() -> None:
                         help=f"page cache file (default: {DEFAULT_CACHE.name})")
     parser.add_argument("--no-cache", action="store_true",
                         help="ignore the cache and re-extract every page")
+    parser.add_argument("--offline", action="store_true",
+                        help="rebuild the export from the cache alone — no network, no "
+                             "LLM calls. Use after changing normalisation or bank mappings.")
     parser.add_argument("--merge", metavar="DATA_JSON",
                         help="also merge the export into this offerspot data.json")
     parser.add_argument("-v", "--verbose", action="store_true")

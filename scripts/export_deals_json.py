@@ -32,13 +32,17 @@ BANK_NAME_MAP = {
     "commerzbank lanka": "Commercial Bank",
     "comerica bank": "Commercial Bank",
     "dfcc bank": "DFCC Bank",
-    "dfcc bank plc": "DFCC Bank",
-    "dfcc bank plc.": "DFCC Bank",
     "hsbc": "HSBC",
     "hsbc lk": "HSBC",
     "hsbc sri lanka": "HSBC",
     "sampath bank": "Sampath Bank",
 }
+
+# Corporate suffixes the LLM appends inconsistently — the same bank arrives as
+# "DFCC Bank", "DFCC Bank PLC" and "DFCC Bank PLC.". Stripping these before the
+# lookup beats enumerating every combination, which is how "Commercial Bank of
+# Ceylon PLC" slipped through and became its own bank.
+BANK_NAME_SUFFIXES = ("plc", "ltd", "limited", "pvt", "private", "sri lanka", "lanka")
 
 # Bank short codes for ID generation
 BANK_CODES = {
@@ -52,8 +56,28 @@ BANK_CODES = {
 
 
 def normalize_bank(raw: str) -> str:
-    """Map messy LLM-extracted bank names to canonical form."""
-    key = raw.strip().lower()
+    """Map messy LLM-extracted bank names to canonical form.
+
+    An unmapped name is returned as-is, which means it lands on the site as a
+    brand new bank with the "unk" ID prefix — so a miss here is visible rather
+    than silent.
+    """
+    key = " ".join(raw.strip().lower().split()).strip(".,")
+    if key in BANK_NAME_MAP:
+        return BANK_NAME_MAP[key]
+
+    # Peel corporate suffixes off the end, repeatedly: "dfcc bank plc." and
+    # "commercial bank of ceylon plc" both reduce to a mapped key.
+    changed = True
+    while changed:
+        changed = False
+        for suffix in BANK_NAME_SUFFIXES:
+            if key.endswith(" " + suffix):
+                key = key[: -len(suffix) - 1].strip().strip(".,")
+                changed = True
+        if key in BANK_NAME_MAP:
+            return BANK_NAME_MAP[key]
+
     return BANK_NAME_MAP.get(key, raw.strip())
 
 
