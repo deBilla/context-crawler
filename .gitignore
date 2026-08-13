@@ -45,3 +45,6 @@ data/
 # Single-process refresh run artefacts (scripts/refresh.py)
 .refresh-cache.json
 deals_export.json
+
+# Weekly refresh run log
+data/weekly.log
