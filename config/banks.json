@@ -149,6 +149,84 @@
         "category_name": "h3",
         "category_link": "a"
       }
+    },
+    {
+      "name": "Hatton National Bank",
+      "base_url": "https://www.hnb.lk",
+      "seed_urls": [
+        "https://www.hnb.lk/card-promotion"
+      ],
+      "url_patterns": [
+        "^https://www\\.hnb\\.lk/card-promotion.*"
+      ],
+      "needs_puppeteer": true,
+      "crawl_strategy": "static",
+      "selectors": {}
+    },
+    {
+      "name": "Seylan Bank",
+      "base_url": "https://www.seylan.lk",
+      "seed_urls": [
+        "https://www.seylan.lk/promotions"
+      ],
+      "url_patterns": [
+        "^https://www\\.seylan\\.lk/promotions.*"
+      ],
+      "needs_puppeteer": false,
+      "crawl_strategy": "static",
+      "selectors": {}
+    },
+    {
+      "name": "Nations Trust Bank",
+      "base_url": "https://www.nationstrust.com",
+      "seed_urls": [
+        "https://www.nationstrust.com/promotions"
+      ],
+      "url_patterns": [
+        "^https://www\\.nationstrust\\.com/promotions.*"
+      ],
+      "needs_puppeteer": false,
+      "crawl_strategy": "static",
+      "selectors": {}
+    },
+    {
+      "name": "National Development Bank",
+      "base_url": "https://www.ndbbank.com",
+      "seed_urls": [
+        "https://www.ndbbank.com/cards/card-offers"
+      ],
+      "url_patterns": [
+        "^https://www\\.ndbbank\\.com/cards/.*"
+      ],
+      "needs_puppeteer": false,
+      "crawl_strategy": "static",
+      "selectors": {}
+    },
+    {
+      "name": "Amana Bank",
+      "base_url": "https://www.amanabank.lk",
+      "seed_urls": [
+        "https://www.amanabank.lk/promotions"
+      ],
+      "url_patterns": [
+        "^https://www\\.amanabank\\.lk/promotions.*"
+      ],
+      "needs_puppeteer": false,
+      "crawl_strategy": "static",
+      "selectors": {}
+    },
+    {
+      "name": "Union Bank",
+      "base_url": "https://www.unionb.com",
+      "seed_urls": [
+        "https://www.unionb.com/promotions"
+      ],
+      "url_patterns": [
+        "^https://www\\.unionb\\.com/promotions.*"
+      ],
+      "needs_puppeteer": false,
+      "crawl_strategy": "static",
+      "selectors": {}
     }
   ]
 }

@@ -36,6 +36,22 @@ BANK_NAME_MAP = {
     "hsbc lk": "HSBC",
     "hsbc sri lanka": "HSBC",
     "sampath bank": "Sampath Bank",
+    # Sri Lankans overwhelmingly search the short forms, and the extractor
+    # picks up whichever the page happened to print.
+    "hatton national bank": "Hatton National Bank",
+    "hnb": "Hatton National Bank",
+    "seylan bank": "Seylan Bank",
+    "seylan": "Seylan Bank",
+    "nations trust bank": "Nations Trust Bank",
+    "nations trust": "Nations Trust Bank",
+    "ntb": "Nations Trust Bank",
+    "national development bank": "National Development Bank",
+    "ndb": "National Development Bank",
+    "ndb bank": "National Development Bank",
+    "amana bank": "Amana Bank",
+    "amana": "Amana Bank",
+    "union bank": "Union Bank",
+    "union bank of colombo": "Union Bank",
 }
 
 # Corporate suffixes the LLM appends inconsistently — the same bank arrives as
@@ -52,6 +68,12 @@ BANK_CODES = {
     "DFCC Bank": "dfcc",
     "HSBC": "hsbc",
     "Sampath Bank": "sp",
+    "Hatton National Bank": "hnb",
+    "Seylan Bank": "seylan",
+    "Nations Trust Bank": "ntb",
+    "National Development Bank": "ndb",
+    "Amana Bank": "amana",
+    "Union Bank": "union",
 }
 
 
