@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import tempfile
 from abc import ABC, abstractmethod
 
 import httpx
@@ -237,6 +238,11 @@ class ClaudeCodeClient(LLMClient):
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # Run from a neutral directory. Started inside this repo the CLI
+            # loads its CLAUDE.md as project context — 4KB of instructions about
+            # crawler architecture, prepended to every extraction call, which is
+            # both wasted tokens and a prompt the model may try to act on.
+            cwd=tempfile.gettempdir(),
         )
         # Prompts carry whole pages of HTML, well past the 1MB ARG_MAX ceiling
         # an argv-passed prompt would hit, so the prompt goes over stdin.
