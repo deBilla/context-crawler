@@ -137,7 +137,14 @@ def normalize_card_types(raw) -> list[str]:
 
 
 def determine_offer_type(row: dict) -> dict:
-    """Build offer_details from discount fields."""
+    """Build offer_details from discount fields.
+
+    `max_discount_lkr` keeps its name because the published data.json already
+    uses it and renaming would orphan every existing offer. `currency` is
+    emitted alongside so the amount is self-describing and a second market
+    would not need the field renamed — the site already reads
+    `details.currency` with LKR only as a fallback.
+    """
     pct = row.get("discount_percentage")
     amt = row.get("discount_amount")
     max_lkr = row.get("max_discount_lkr")
@@ -147,18 +154,21 @@ def determine_offer_type(row: dict) -> dict:
             "type": "percentage",
             "value": float(pct),
             "max_discount_lkr": float(max_lkr) if max_lkr else None,
+            "currency": "LKR",
         }
     elif amt and float(amt) > 0:
         return {
             "type": "fixed",
             "value": float(amt),
             "max_discount_lkr": float(max_lkr) if max_lkr else None,
+            "currency": "LKR",
         }
     else:
         return {
             "type": "percentage",
             "value": None,
             "max_discount_lkr": float(max_lkr) if max_lkr else None,
+            "currency": "LKR",
         }
 
 
@@ -179,6 +189,11 @@ def row_to_offerspot(row: dict, offer_id: str) -> dict:
         "id": offer_id,
         "bank": bank,
         "card_types": card_types,
+        # The extractor reads the product name off the bank's page ("Platinum
+        # Mastercard") and this used to drop it on the floor. Kept now: it is
+        # the only card-level signal in the feed, and "which card" is the
+        # question people actually ask.
+        "card_name": (row.get("card_name") or "").strip() or None,
         "category": (row.get("category") or "Other").strip().strip("'\""),
         "merchant": {
             "name": row.get("merchant_name") or None,

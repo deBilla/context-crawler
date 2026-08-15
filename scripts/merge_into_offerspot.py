@@ -33,7 +33,7 @@ ID_PATTERN = re.compile(r"^po-([a-z]+)-(\d+)$")
 
 # Fields the bank can legitimately change between crawls. Everything else is
 # either part of the identity key or derived from it.
-MUTABLE_FIELDS = ("bank", "card_types", "category", "offer_details", "validity", "terms")
+MUTABLE_FIELDS = ("bank", "card_types", "card_name", "category", "offer_details", "validity", "terms")
 
 Offer = Dict[str, Any]
 Key = Tuple[str, str, str, str]
