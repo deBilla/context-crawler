@@ -18,6 +18,85 @@ from extractor.prompts import (
 logger = logging.getLogger(__name__)
 
 
+def validate_deals(deals_data: list, url: str) -> list[CreditCardDeal]:
+    """Coerce, filter and validate raw LLM deal dicts for one source URL.
+
+    Split out of extract_deals so a caller that extracts several pages in a
+    single LLM call can reuse exactly this path per page, rather than
+    reimplementing the alias mapping, placeholder filtering and date coercion
+    and drifting from it.
+    """
+    # Validate and collect deals
+    valid_deals: list[CreditCardDeal] = []
+    for i, deal_data in enumerate(deals_data):
+        try:
+            if not isinstance(deal_data, dict):
+                logger.warning(
+                    "Deal %d is not a dict for URL: %s", i, url
+                )
+                continue
+
+            # Normalize common LLM field-name mismatches
+            aliases = {
+                "title": "promotion_title",
+                "name": "promotion_title",
+                "promo_title": "promotion_title",
+                "offer_title": "promotion_title",
+                "bank": "bank_name",
+                "card": "card_name",
+                "desc": "description",
+                "offer_description": "description",
+                "details": "description",
+                "type": "category",
+                "discount": "discount_percentage",
+                "merchant": "merchant_name",
+                "valid_start": "valid_from",
+                "start_date": "valid_from",
+                "valid_end": "valid_until",
+                "end_date": "valid_until",
+                "expiry_date": "valid_until",
+                "terms": "terms_and_conditions",
+                "conditions": "terms_and_conditions",
+            }
+            for old_key, new_key in aliases.items():
+                if old_key in deal_data and new_key not in deal_data:
+                    deal_data[new_key] = deal_data.pop(old_key)
+
+            # Drop "No offers available" notices and bare "View details"
+            # stubs before they reach the database and, from there, the site.
+            if is_placeholder_deal(deal_data):
+                logger.info(
+                    "Skipping placeholder deal %d from %s: %r",
+                    i,
+                    url,
+                    deal_data.get("promotion_title"),
+                )
+                continue
+
+            # Coerce dates and filler strings before validation. Without
+            # this a value like "30th September 2025" fails the `date` type
+            # and the whole deal is discarded, losing the discount, merchant
+            # and terms along with the date.
+            deal_data = normalize_deal(deal_data)
+
+            # Inject source_url — the LLM doesn't know it
+            deal_data["source_url"] = url
+            deal = CreditCardDeal(**deal_data)
+            valid_deals.append(deal)
+        except Exception as e:
+            logger.warning(
+                "Failed to validate deal %d from URL %s: %s\nDeal data: %s",
+                i,
+                url,
+                str(e),
+                json.dumps(deal_data, default=str)[:500],
+            )
+            continue
+
+
+    return valid_deals
+
+
 async def extract_deals(
     llm: LLMClient,
     url: str,
@@ -85,72 +164,7 @@ async def extract_deals(
             )
             return []
 
-        # Validate and collect deals
-        valid_deals: list[CreditCardDeal] = []
-        for i, deal_data in enumerate(deals_data):
-            try:
-                if not isinstance(deal_data, dict):
-                    logger.warning(
-                        "Deal %d is not a dict for URL: %s", i, url
-                    )
-                    continue
-
-                # Normalize common LLM field-name mismatches
-                aliases = {
-                    "title": "promotion_title",
-                    "name": "promotion_title",
-                    "promo_title": "promotion_title",
-                    "offer_title": "promotion_title",
-                    "bank": "bank_name",
-                    "card": "card_name",
-                    "desc": "description",
-                    "offer_description": "description",
-                    "details": "description",
-                    "type": "category",
-                    "discount": "discount_percentage",
-                    "merchant": "merchant_name",
-                    "valid_start": "valid_from",
-                    "start_date": "valid_from",
-                    "valid_end": "valid_until",
-                    "end_date": "valid_until",
-                    "expiry_date": "valid_until",
-                    "terms": "terms_and_conditions",
-                    "conditions": "terms_and_conditions",
-                }
-                for old_key, new_key in aliases.items():
-                    if old_key in deal_data and new_key not in deal_data:
-                        deal_data[new_key] = deal_data.pop(old_key)
-
-                # Drop "No offers available" notices and bare "View details"
-                # stubs before they reach the database and, from there, the site.
-                if is_placeholder_deal(deal_data):
-                    logger.info(
-                        "Skipping placeholder deal %d from %s: %r",
-                        i,
-                        url,
-                        deal_data.get("promotion_title"),
-                    )
-                    continue
-
-                # Coerce dates and filler strings before validation. Without
-                # this a value like "30th September 2025" fails the `date` type
-                # and the whole deal is discarded, losing the discount, merchant
-                # and terms along with the date.
-                deal_data = normalize_deal(deal_data)
-
-                # Inject source_url — the LLM doesn't know it
-                deal_data["source_url"] = url
-                deal = CreditCardDeal(**deal_data)
-                valid_deals.append(deal)
-            except Exception as e:
-                logger.warning(
-                    "Failed to validate deal %d from URL %s: %s\nDeal data: %s",
-                    i,
-                    url,
-                    str(e),
-                    json.dumps(deal_data, default=str)[:500],
-                )
-                continue
+        valid_deals = validate_deals(deals_data, url)
 
         logger.info(
             "Extracted %d valid deals from %s", len(valid_deals), url

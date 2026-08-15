@@ -25,12 +25,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import re
 import sys
 import time
 from collections import Counter, defaultdict, deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -42,7 +44,13 @@ for _pkg in ("shared", "services/crawler", "services/parser", "services/extracto
 from crawler.config import CrawlerConfig  # noqa: E402
 from crawler.fetcher import FetchError, PageFetcher, create_http_client  # noqa: E402
 from export_deals_json import BANK_CODES, normalize_bank, row_to_offerspot  # noqa: E402
-from extractor.extract import extract_deals  # noqa: E402
+from extractor.extract import extract_deals, validate_deals  # noqa: E402
+from extractor.prompts import (  # noqa: E402
+    CANONICAL_CATEGORIES,
+    EXTRACTION_PROMPT,
+    VALID_CARD_TYPES,
+    prepare_content,
+)
 from parser.html_parser import extract_links, extract_text, extract_title  # noqa: E402
 from parser.link_filter import filter_urls  # noqa: E402
 from parser.relevance import check_relevance, pre_filter  # noqa: E402
@@ -56,11 +64,19 @@ DEFAULT_EXPORT = ROOT / "deals_export.json"
 
 
 class PageCache:
-    """Per-URL content hash plus the deals last extracted from that page.
+    """Per-URL content fingerprint plus the deals last extracted from that page.
 
-    Storing the deals and not just the hash is the point: an unchanged page can
-    then contribute its offers again without a second trip to the LLM. Without
-    that, a nightly run would re-extract all ~845 offers every time.
+    Storing the deals and not just the fingerprint is the point: an unchanged
+    page can then contribute its offers again without a second trip to the LLM.
+    Without that, a nightly run would re-extract everything every time.
+
+    The fingerprint is of the *extracted text*, not the raw HTML. Bank pages are
+    not byte-stable between fetches — People's Bank and Commercial Bank both
+    return a different HTML hash every request, differing by a byte or two of
+    per-request markup — so hashing the response made every page look changed
+    and the cache never hit. The text that survives boilerplate stripping is
+    stable, and it is also exactly what the model is shown, so if it has not
+    moved neither has the extraction.
     """
 
     def __init__(self, path: Path, enabled: bool = True) -> None:
@@ -73,16 +89,16 @@ class PageCache:
             except (json.JSONDecodeError, OSError) as exc:
                 logger.warning("Ignoring unreadable cache %s: %s", path, exc)
 
-    def hit(self, url: str, content_hash: str) -> list[dict] | None:
+    def hit(self, url: str, fingerprint: str) -> list[dict] | None:
         if not self.enabled:
             return None
         entry = self.entries.get(url)
-        if entry and entry.get("hash") == content_hash:
+        if entry and entry.get("hash") == fingerprint:
             return entry.get("deals", [])
         return None
 
-    def store(self, url: str, content_hash: str, deals: list[dict]) -> None:
-        self.entries[url] = {"hash": content_hash, "deals": deals}
+    def store(self, url: str, fingerprint: str, deals: list[dict]) -> None:
+        self.entries[url] = {"hash": fingerprint, "deals": deals}
 
     def save(self) -> None:
         if not self.enabled:
@@ -110,6 +126,21 @@ class DomainThrottle:
             self._last[domain] = time.monotonic()
 
 
+def text_fingerprint(text: str) -> str:
+    """Hash of the page text the model will be shown."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class Pending:
+    """A page that passed relevance and still needs extracting."""
+
+    url: str
+    title: str
+    text: str
+    fingerprint: str
+
+
 class ExtractionFailed(RuntimeError):
     """Extraction did not complete — as distinct from finding nothing."""
 
@@ -128,6 +159,76 @@ MAX_CONSECUTIVE_FAILURES = 5
 # limits reset on a window, so failures arrive in long runs rather than singly.
 EXTRACT_ATTEMPTS = 3
 EXTRACT_BACKOFF_SECONDS = (5, 20)
+
+
+# Pages sent to the model together. The fixed system-prompt preamble is paid
+# once per call rather than once per page, which measured 40% fewer tokens at
+# three; larger batches push the JSON reply toward the output ceiling, where a
+# truncated array costs the whole group rather than one page.
+EXTRACT_BATCH_SIZE = 3
+
+
+async def extract_batch(llm, pages: list[tuple[str, str, str]], *, stats: Counter):
+    """Extract several pages in one call. Returns {url: [CreditCardDeal]}.
+
+    Pages are labelled by ordinal rather than by URL and mapped back here.
+    Asking the model to echo a URL invites near-miss strings that silently
+    attribute a deal to the wrong page; an integer either matches a page we
+    sent or it does not.
+    """
+    if len(pages) == 1:
+        url, title, text = pages[0]
+        return {url: await extract_with_retry(llm, url, title, text, stats=stats)}
+
+    blocks = []
+    for index, (url, title, text) in enumerate(pages, start=1):
+        prepared = prepare_content(text, 8000)
+        blocks.append(f"=== PAGE {index} ===\nURL: {url}\nTITLE: {title}\nCONTENT:\n{prepared}")
+
+    prompt = EXTRACTION_PROMPT.format(
+        page_title="(multiple pages)",
+        url="(multiple pages)",
+        content="\n\n".join(blocks),
+        card_types=", ".join(VALID_CARD_TYPES),
+        categories=", ".join(CANONICAL_CATEGORIES),
+    ) + (
+        f"\n\nThe content above contains {len(pages)} pages delimited by === PAGE n ===."
+        " Return ONE flat JSON array covering every page, and give each deal a"
+        ' "page" field holding the integer of the page it came from.'
+    )
+
+    stats["llm_extract_batched"] += 1
+    for attempt in range(EXTRACT_ATTEMPTS):
+        try:
+            response = await llm.complete_json(prompt, max_tokens=8000)
+            break
+        except Exception as exc:  # noqa: BLE001 — provider errors are untyped
+            if attempt == EXTRACT_ATTEMPTS - 1:
+                raise ExtractionFailed(str(exc) or "no error text from provider") from exc
+            stats["extract_retried"] += 1
+            await asyncio.sleep(EXTRACT_BACKOFF_SECONDS[attempt])
+
+    if not isinstance(response, list):
+        # A batch that comes back the wrong shape is not evidence about any
+        # single page, so fall back to one call each rather than record zeros.
+        logger.warning("batched extraction returned %s, falling back to per-page", type(response).__name__)
+        stats["batch_fallback"] += 1
+        return {
+            url: await extract_with_retry(llm, url, title, text, stats=stats)
+            for url, title, text in pages
+        }
+
+    grouped: dict[str, list] = {url: [] for url, _, _ in pages}
+    for deal in response:
+        if not isinstance(deal, dict):
+            continue
+        page = deal.pop("page", None)
+        if not isinstance(page, int) or not 1 <= page <= len(pages):
+            stats["batch_unattributed"] += 1
+            continue
+        grouped[pages[page - 1][0]].append(deal)
+
+    return {url: validate_deals(raw, url) for url, raw in grouped.items()}
 
 
 async def extract_with_retry(llm, url: str, title: str, text: str, *, stats: Counter):
@@ -169,8 +270,12 @@ async def process_page(
     max_depth: int,
     use_puppeteer: bool,
     stats: Counter,
-) -> tuple[list[dict], list[str]]:
-    """Fetch one page; return (deals as CreditCardDeal dicts, links to follow)."""
+) -> tuple[list[dict], list[str], "Pending | None"]:
+    """Fetch and screen one page.
+
+    Returns (deals already known from cache, links to follow, work still owed
+    to the extractor). Only one of the first and third is ever non-empty.
+    """
     domain = urlparse(url).netloc
     await throttle.acquire(domain)
 
@@ -182,7 +287,7 @@ async def process_page(
     except FetchError as exc:
         logger.warning("fetch failed %s: %s", url, exc)
         stats["fetch_failed"] += 1
-        return [], []
+        return [], [], None
 
     html = result.content
     try:
@@ -191,18 +296,20 @@ async def process_page(
     except Exception as exc:  # noqa: BLE001 — malformed HTML must not stop the crawl
         logger.warning("parse failed %s: %s", url, exc)
         stats["parse_failed"] += 1
-        return [], []
+        return [], [], None
 
     patterns = [re.compile(p) for p in bank.get("url_patterns", [])]
     followable = filter_urls(links, domain, max_depth, depth, patterns or None)
 
-    cached = cache.hit(url, result.content_hash)
+    text = extract_text(html)
+    fingerprint = text_fingerprint(text)
+
+    cached = cache.hit(url, fingerprint)
     if cached is not None:
         stats["unchanged"] += 1
-        return cached, followable
+        return cached, followable, None
 
     stats["changed"] += 1
-    text = extract_text(html)
 
     # Two-stage relevance gate, matching parser/main.py: the cheap URL/title
     # heuristic answers most pages, and only genuine ambiguity costs a call.
@@ -217,37 +324,14 @@ async def process_page(
     stats[f"prefilter_{verdict}"] += 1
 
     if not relevant:
+        # Safe to cache: this is a judgement about the page, not a failed call.
         stats["irrelevant"] += 1
-        cache.store(url, result.content_hash, [])
-        return [], followable
+        cache.store(url, fingerprint, [])
+        return [], followable, None
 
-    stats["llm_extract"] += 1
-    try:
-        deals = await extract_with_retry(llm, url, title, text, stats=stats)
-    except ExtractionFailed as exc:
-        # Deliberately not cached. Storing [] here would record "this page has
-        # no offers" as fact, and the page would then be skipped on every
-        # future run until the bank happens to edit it — which is how a
-        # rate-limited run silently erased six banks.
-        logger.warning("giving up on %s: %s", url, exc)
-        stats["extract_failed"] += 1
-        stats["consecutive_failures"] += 1
-        # Failures that keep coming are not bad pages, they are a dead
-        # provider — a spent rate-limit window looks exactly like this. Stop
-        # the run so the caller sees an error, rather than marching through
-        # the remaining banks recording zero offers for each.
-        if stats["consecutive_failures"] >= MAX_CONSECUTIVE_FAILURES:
-            raise ProviderUnavailable(
-                f"{stats['consecutive_failures']} extractions failed in a row; "
-                f"last error: {exc}"
-            )
-        return [], followable
-
-    stats["consecutive_failures"] = 0
-    payload = [deal.model_dump(mode="json") for deal in deals]
-    stats["deals_found"] += len(payload)
-    cache.store(url, result.content_hash, payload)
-    return payload, followable
+    # Extraction is deferred so several pages can share one LLM call; the
+    # caller batches whatever comes back pending.
+    return [], followable, Pending(url=url, title=title, text=text, fingerprint=fingerprint)
 
 
 async def crawl_bank(
@@ -282,18 +366,63 @@ async def crawl_bank(
     seen.update(bank["seed_urls"])
     collected: list[dict] = []
 
+    pending: list[Pending] = []
+
+    async def drain(batch: list[Pending]) -> None:
+        """Extract a batch and fold the results into `collected` and the cache."""
+        if not batch:
+            return
+        stats["llm_extract"] += 1
+        try:
+            results = await extract_batch(
+                llm, [(item.url, item.title, item.text) for item in batch], stats=stats
+            )
+        except ExtractionFailed as exc:
+            # Nothing here is cached. Recording [] would state "these pages
+            # have no offers" as fact, and they would then be skipped every
+            # future run until the bank edits them — which is how a
+            # rate-limited run silently erased six banks.
+            logger.warning("giving up on %d page(s): %s", len(batch), exc)
+            stats["extract_failed"] += len(batch)
+            stats["consecutive_failures"] += 1
+            # Failures that keep coming are a dead provider, not dull pages —
+            # a spent rate-limit window looks exactly like this. Stop, so the
+            # caller sees an error instead of zeros for every remaining bank.
+            if stats["consecutive_failures"] >= MAX_CONSECUTIVE_FAILURES:
+                raise ProviderUnavailable(
+                    f"{stats['consecutive_failures']} extractions failed in a row; "
+                    f"last error: {exc}"
+                )
+            return
+
+        stats["consecutive_failures"] = 0
+        for item in batch:
+            payload = [deal.model_dump(mode="json") for deal in results.get(item.url, [])]
+            stats["deals_found"] += len(payload)
+            cache.store(item.url, item.fingerprint, payload)
+            collected.extend(payload)
+
     while frontier and len(seen) <= max_pages:
         url, depth = frontier.popleft()
-        deals, links = await process_page(
+        deals, links, owed = await process_page(
             url, depth, bank,
             fetcher=fetcher, llm=llm, cache=cache, throttle=throttle,
             max_depth=max_depth, use_puppeteer=use_puppeteer, stats=stats,
         )
         collected.extend(deals)
+        if owed is not None:
+            pending.append(owed)
+            # Batches never span banks: one bank's markup must not influence
+            # how another's is read, and attribution stays within one site.
+            if len(pending) >= EXTRACT_BATCH_SIZE:
+                await drain(pending)
+                pending = []
         for link in links:
             if link not in seen and len(seen) < max_pages:
                 seen.add(link)
                 frontier.append((link, depth + 1))
+
+    await drain(pending)
 
     logger.info("%s: %d pages, %d deals", name, len(seen), len(collected))
     stats["pages"] += len(seen)
@@ -346,8 +475,9 @@ def finish(
         for label in (
             "pages", "unchanged", "changed", "fetch_failed", "parse_failed",
             "prefilter_likely", "prefilter_unlikely", "prefilter_uncertain",
-            "llm_relevance", "llm_extract", "irrelevant", "deals_found",
-            "puppeteer_unavailable",
+            "llm_relevance", "llm_extract", "llm_extract_batched", "extract_retried",
+            "extract_failed", "batch_fallback", "batch_unattributed", "irrelevant",
+            "deals_found", "puppeteer_unavailable",
         ):
             logger.info("  %-22s %d", label, stats[label])
         logger.info("  %-22s %d", "llm calls total",
