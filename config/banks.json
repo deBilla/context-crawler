@@ -160,7 +160,7 @@
         "^https://www\\.hnb\\.lk/card-promotion.*"
       ],
       "needs_puppeteer": true,
-      "crawl_strategy": "static",
+      "crawl_strategy": "pagination",
       "selectors": {}
     },
     {

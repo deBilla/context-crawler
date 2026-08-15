@@ -281,7 +281,10 @@ async def process_page(
 
     try:
         if use_puppeteer:
-            result = await fetcher.fetch_with_puppeteer(url)
+            # Strategies declared in banks.json that amount to "there is more
+            # behind an interaction". The sidecar handles both generically.
+            expand = bank.get("crawl_strategy") in {"infinite_scroll", "load_more_button", "pagination"}
+            result = await fetcher.fetch_with_puppeteer(url, expand=expand)
         else:
             result = await fetcher.fetch(url)
     except FetchError as exc:

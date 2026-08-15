@@ -47,12 +47,22 @@ class PageFetcher:
         self.client = client
         self.config = config
 
-    async def fetch_with_puppeteer(self, url: str) -> FetchResult:
-        """Fetch a URL using the Puppeteer sidecar for JS rendering."""
+    async def fetch_with_puppeteer(self, url: str, expand: bool = False) -> FetchResult:
+        """Fetch a URL using the Puppeteer sidecar for JS rendering.
+
+        `expand` asks the sidecar to scroll and click through "load more"
+        before returning. Banks that paginate their catalogue — HNB shows ten
+        of several hundred promotions on first paint — otherwise report a
+        fraction of what they carry.
+        """
         try:
             response = await self.client.post(
                 f"{self.config.puppeteer_url}/render",
-                json={"url": url, "timeout": int(self.config.timeout * 1000)},
+                json={
+                    "url": url,
+                    "timeout": int(self.config.timeout * 1000),
+                    "expand": expand,
+                },
                 timeout=httpx.Timeout(connect=10.0, read=self.config.timeout + 10, write=10.0, pool=10.0),
             )
         except httpx.TimeoutException:
