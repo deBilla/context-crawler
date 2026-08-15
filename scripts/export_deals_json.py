@@ -25,6 +25,7 @@ BANK_NAME_MAP = {
     "people's bank of sri lanka": "People's Bank",
     "bank of ceylon": "Bank of Ceylon",
     "boc": "Bank of Ceylon",
+    "boc bank": "Bank of Ceylon",
     "commercial bank": "Commercial Bank",
     "comercial bank": "Commercial Bank",
     "commerical bank": "Commercial Bank",
@@ -40,11 +41,16 @@ BANK_NAME_MAP = {
     # picks up whichever the page happened to print.
     "hatton national bank": "Hatton National Bank",
     "hnb": "Hatton National Bank",
+    # Acronym plus the word "bank" — the extractor writes whichever the page
+    # used, and "HNB Bank" is not reducible by suffix-stripping the way "PLC"
+    # is, so each is listed.
+    "hnb bank": "Hatton National Bank",
     "seylan bank": "Seylan Bank",
     "seylan": "Seylan Bank",
     "nations trust bank": "Nations Trust Bank",
     "nations trust": "Nations Trust Bank",
     "ntb": "Nations Trust Bank",
+    "ntb bank": "Nations Trust Bank",
     "national development bank": "National Development Bank",
     "ndb": "National Development Bank",
     "ndb bank": "National Development Bank",
