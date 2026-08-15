@@ -110,6 +110,44 @@ class DomainThrottle:
             self._last[domain] = time.monotonic()
 
 
+class ExtractionFailed(RuntimeError):
+    """Extraction did not complete — as distinct from finding nothing."""
+
+
+class ProviderUnavailable(RuntimeError):
+    """Too many extractions failed in a row to believe the provider is up."""
+
+
+# One dead page is normal; a run of them is a spent rate-limit window or an
+# outage. Low enough to stop before a whole bank is written off as empty.
+MAX_CONSECUTIVE_FAILURES = 5
+
+
+# Enough attempts to ride out a blip, few enough that a genuine outage is not
+# hammered. The subscription-backed provider is the reason this exists: its
+# limits reset on a window, so failures arrive in long runs rather than singly.
+EXTRACT_ATTEMPTS = 3
+EXTRACT_BACKOFF_SECONDS = (5, 20)
+
+
+async def extract_with_retry(llm, url: str, title: str, text: str, *, stats: Counter):
+    last: Exception | None = None
+    for attempt in range(EXTRACT_ATTEMPTS):
+        try:
+            return await extract_deals(llm, url, title, text, raise_on_error=True)
+        except Exception as exc:  # noqa: BLE001 — provider errors are untyped
+            last = exc
+            if attempt < EXTRACT_ATTEMPTS - 1:
+                delay = EXTRACT_BACKOFF_SECONDS[attempt]
+                stats["extract_retried"] += 1
+                logger.warning(
+                    "extract failed for %s (attempt %d/%d): %s — retrying in %ds",
+                    url, attempt + 1, EXTRACT_ATTEMPTS, exc, delay,
+                )
+                await asyncio.sleep(delay)
+    raise ExtractionFailed(str(last) or "no error text from provider")
+
+
 async def puppeteer_available(fetcher: PageFetcher, url: str) -> bool:
     """Probe the sidecar so a missing container degrades instead of erroring."""
     try:
@@ -184,7 +222,28 @@ async def process_page(
         return [], followable
 
     stats["llm_extract"] += 1
-    deals = await extract_deals(llm, url, title, text)
+    try:
+        deals = await extract_with_retry(llm, url, title, text, stats=stats)
+    except ExtractionFailed as exc:
+        # Deliberately not cached. Storing [] here would record "this page has
+        # no offers" as fact, and the page would then be skipped on every
+        # future run until the bank happens to edit it — which is how a
+        # rate-limited run silently erased six banks.
+        logger.warning("giving up on %s: %s", url, exc)
+        stats["extract_failed"] += 1
+        stats["consecutive_failures"] += 1
+        # Failures that keep coming are not bad pages, they are a dead
+        # provider — a spent rate-limit window looks exactly like this. Stop
+        # the run so the caller sees an error, rather than marching through
+        # the remaining banks recording zero offers for each.
+        if stats["consecutive_failures"] >= MAX_CONSECUTIVE_FAILURES:
+            raise ProviderUnavailable(
+                f"{stats['consecutive_failures']} extractions failed in a row; "
+                f"last error: {exc}"
+            )
+        return [], followable
+
+    stats["consecutive_failures"] = 0
     payload = [deal.model_dump(mode="json") for deal in deals]
     stats["deals_found"] += len(payload)
     cache.store(url, result.content_hash, payload)
@@ -330,6 +389,16 @@ async def run(args: argparse.Namespace) -> int:
     stats: Counter = Counter()
     cache = PageCache(Path(args.cache), enabled=not args.no_cache)
 
+    if args.forget_empty:
+        needle = args.forget_empty.lower()
+        stale = [u for u, v in cache.entries.items()
+                 if needle in urlparse(u).netloc.lower() and not v.get("deals")]
+        for u in stale:
+            del cache.entries[u]
+        cache.save()
+        logger.info("forgot %d cached-empty pages matching %r", len(stale), args.forget_empty)
+        return 0
+
     if args.offline:
         if not cache.entries:
             logger.error("--offline needs a populated cache; %s is empty or missing", args.cache)
@@ -349,20 +418,40 @@ async def run(args: argparse.Namespace) -> int:
     llm = create_llm_client(llm_config)
 
     all_deals: list[dict] = []
+    aborted: ProviderUnavailable | None = None
     try:
         for bank in banks:
-            all_deals.extend(await crawl_bank(
-                bank,
-                fetcher=fetcher, llm=llm, cache=cache, throttle=throttle,
-                config=config, max_depth=args.max_depth,
-                max_pages=args.max_pages_per_bank, stats=stats,
-            ))
+            try:
+                all_deals.extend(await crawl_bank(
+                    bank,
+                    fetcher=fetcher, llm=llm, cache=cache, throttle=throttle,
+                    config=config, max_depth=args.max_depth,
+                    max_pages=args.max_pages_per_bank, stats=stats,
+                ))
+            except ProviderUnavailable as exc:
+                # Stop crawling, but keep what earlier banks produced and save
+                # the cache — the point is to avoid recording the remaining
+                # banks as empty, not to throw away a half-finished run.
+                aborted = exc
+                break
     finally:
         await client.aclose()
         await llm.close()
         cache.save()
 
-    return finish(args, all_deals, stats)
+    if aborted is not None:
+        logger.error("ABORTED: %s", aborted)
+        logger.error(
+            "%d banks were not reached. Nothing was cached for the failures, so "
+            "re-running once the provider recovers will retry them.",
+            len(banks) - len({d.get("bank_name") for d in all_deals}),
+        )
+
+    exit_code = finish(args, all_deals, stats)
+    # A partial run must not exit 0: weekly-refresh.sh keys its publish
+    # decision off this, and the sanity floors alone would happily publish a
+    # catalogue missing every bank we never reached.
+    return 1 if aborted is not None else exit_code
 
 
 def main() -> None:
@@ -378,6 +467,10 @@ def main() -> None:
                         help=f"page cache file (default: {DEFAULT_CACHE.name})")
     parser.add_argument("--no-cache", action="store_true",
                         help="ignore the cache and re-extract every page")
+    parser.add_argument("--forget-empty", metavar="DOMAIN",
+                        help="drop cached empty results for this domain so the next run "
+                             "re-extracts them. Use after a run failed provider-side and "
+                             "recorded pages as having no offers.")
     parser.add_argument("--offline", action="store_true",
                         help="rebuild the export from the cache alone — no network, no "
                              "LLM calls. Use after changing normalisation or bank mappings.")

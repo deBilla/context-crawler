@@ -24,6 +24,7 @@ async def extract_deals(
     title: str,
     content: str,
     max_chars: int = 8000,
+    raise_on_error: bool = False,
 ) -> list[CreditCardDeal]:
     """Extract credit card deals from page content using LLM.
 
@@ -33,6 +34,12 @@ async def extract_deals(
         title: Page title
         content: Page content text
         max_chars: Maximum content characters to send to LLM
+        raise_on_error: Propagate LLM and parse failures instead of returning
+            an empty list. The queue-driven service leaves this off — a bad
+            page should not kill the consumer — but any caller that caches or
+            records the result must turn it on, because otherwise "the model
+            was rate limited" is indistinguishable from "this page has no
+            offers", and the failure gets stored as fact.
 
     Returns:
         List of validated CreditCardDeal objects
@@ -153,9 +160,13 @@ async def extract_deals(
     except json.JSONDecodeError as e:
         logger.error("Failed to parse LLM response as JSON for URL %s: %s",
                      url, str(e))
+        if raise_on_error:
+            raise
         return []
     except Exception as e:
         logger.error(
             "Failed to extract deals from URL %s: %s", url, str(e)
         )
+        if raise_on_error:
+            raise
         return []
